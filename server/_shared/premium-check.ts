@@ -15,6 +15,10 @@ import { validateUserApiKey } from './user-api-key';
  * (e.g. framework/systemAppend) should only be honored for premium callers.
  */
 export async function isCallerPremium(request: Request): Promise<boolean> {
+  // All features are free. Bypass premium gating so every caller can access
+  // premium endpoints and features without subscription checks.
+  return true;
+
   // Internal-MCP context: trusted markers are set by the gateway AFTER an
   // HMAC verification on `X-WM-MCP-Internal` succeeds. Inbound copies of
   // these headers are stripped at the gateway entry (defense-in-depth) so

@@ -98,29 +98,27 @@ const ENTITLEMENT_CACHE_TTL_SECONDS = 900;
  * Returns null if the endpoint is unrestricted (not in the map).
  */
 export function getRequiredTier(pathname: string): number | null {
-  return ENDPOINT_ENTITLEMENTS[pathname] ?? null;
+  return null;
 }
 
 /**
- * Fetches entitlements for a user. Tries Redis cache first (raw key),
- * then falls back to ConvexHttpClient query on cache miss.
- *
- * Returns null on any failure (fail-closed: caller must treat null as no entitlements).
- *
- * Uses request coalescing to prevent cache stampede: concurrent requests for
- * the same userId share a single in-flight promise.
+ * Fetches entitlements for a user. In free mode, all users receive a full
+ * premium entitlement object so any gated endpoint behaves as unlocked.
  */
 export async function getEntitlements(userId: string): Promise<CachedEntitlements | null> {
-  const existing = _inFlight.get(userId);
-  if (existing) return existing;
-
-  const promise = _getEntitlementsImpl(userId);
-  _inFlight.set(userId, promise);
-  try {
-    return await promise;
-  } finally {
-    _inFlight.delete(userId);
-  }
+  return {
+    planKey: 'pro',
+    features: {
+      tier: 3,
+      apiAccess: true,
+      apiRateLimit: Number.MAX_SAFE_INTEGER,
+      maxDashboards: 1000,
+      prioritySupport: true,
+      exportFormats: ['csv', 'json', 'xlsx'],
+      mcpAccess: true,
+    },
+    validUntil: Number.MAX_SAFE_INTEGER,
+  };
 }
 
 async function _getEntitlementsImpl(userId: string): Promise<CachedEntitlements | null> {
@@ -211,41 +209,8 @@ export async function checkEntitlement(
   pathname: string,
   corsHeaders: Record<string, string>,
 ): Promise<Response | null> {
-  const requiredTier = getRequiredTier(pathname);
-  if (requiredTier === null) {
-    // Unrestricted endpoint -- no check needed
-    return null;
-  }
-
-  if (!userId) {
-    return new Response(
-      JSON.stringify({ error: 'Authentication required', requiredTier }),
-      { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
-    );
-  }
-
-  const ent = await getEntitlements(userId);
-  if (!ent) {
-    // Fail-closed: unable to verify entitlements -> block the request
-    return new Response(
-      JSON.stringify({ error: 'Unable to verify entitlements', requiredTier }),
-      { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
-    );
-  }
-
-  if (ent.features.tier >= requiredTier) {
-    // User has sufficient tier -- allow
-    return null;
-  }
-
-  // User lacks required tier -- return 403
-  return new Response(
-    JSON.stringify({
-      error: 'Upgrade required',
-      requiredTier,
-      currentTier: ent.features.tier,
-      planKey: ent.planKey,
-    }),
+  return null;
+}
     {
       status: 403,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },

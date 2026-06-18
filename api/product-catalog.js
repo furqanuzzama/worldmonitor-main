@@ -229,51 +229,33 @@ export default async function handler(req) {
   const cors = getCorsHeaders(req);
 
   if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers: { ...cors, 'Access-Control-Allow-Methods': 'GET, DELETE, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' } });
+    return new Response(null, { status: 204, headers: { ...cors, 'Access-Control-Allow-Methods': 'GET, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type, Authorization' } });
   }
 
-  // DELETE = purge cache (authenticated)
-  if (req.method === 'DELETE') {
-    const authHeader = req.headers.get('Authorization') ?? '';
-    if (!RELAY_SECRET || authHeader !== `Bearer ${RELAY_SECRET}`) {
-      return json({ error: 'Unauthorized' }, 401, cors);
-    }
-    await purgeCache();
-    return json({ purged: true }, 200, cors);
-  }
-
-  // GET = return cached or fresh catalog
   if (req.method !== 'GET') {
     return json({ error: 'Method not allowed' }, 405, cors);
   }
 
-  // Read from Redis (populated by Railway ais-relay seed loop)
-  const cached = await getFromCache();
-  if (cached) {
-    return json(cached, 200, cors, 'public, max-age=300, s-maxage=600, stale-while-revalidate=300', 'cache');
-  }
-
-  // Redis empty (purged or seed hasn't run). Try Dodo directly as backup.
-  // May fail from Vercel IPs (401) — falls back to static prices.
-  if (DODO_API_KEY) {
-    const dodoPrices = await fetchPricesFromDodo();
-    const pricedPublicIds = Object.entries(CATALOG)
-      .filter(([, v]) => PUBLIC_TIER_GROUPS.includes(v.tierGroup) && v.tierGroup !== 'free' && v.tierGroup !== 'enterprise')
-      .map(([id]) => id);
-    const dodoPriceCount = pricedPublicIds.filter(id => dodoPrices[id]).length;
-    if (dodoPriceCount > 0) {
-      const priceSource = dodoPriceCount === pricedPublicIds.length ? 'dodo' : 'partial';
-      const tiers = buildTiers(dodoPrices);
-      const now = Date.now();
-      const result = { tiers, fetchedAt: now, cachedUntil: now + CACHE_TTL * 1000, priceSource };
-      // Don't write to Redis — let the Railway seed own that key with its longer TTL.
-      // Just return the result with short cache so the next Railway cycle repopulates properly.
-      return json(result, 200, cors, 'public, max-age=60, s-maxage=60', 'dodo');
-    }
-  }
-
-  // All sources failed. Return fallback with short cache.
-  const tiers = buildTiers({});
   const now = Date.now();
-  return json({ tiers, fetchedAt: now, cachedUntil: now + 60_000, priceSource: 'fallback' }, 200, cors, 'public, max-age=60, s-maxage=60', 'fallback');
+  return json(
+    {
+      tiers: [
+        {
+          name: 'Free',
+          description: 'All dashboard and API features are available for free.',
+          features: ['Core dashboard panels', 'AI stock analysis & backtesting', 'Daily market briefs', 'Military & geopolitical tracking', 'Custom widgets', 'MCP data connectors', 'Priority data refresh', 'Unlimited API access'],
+          price: 0,
+          period: 'forever',
+          highlighted: true,
+        },
+      ],
+      fetchedAt: now,
+      cachedUntil: now + 300_000,
+      priceSource: 'free',
+    },
+    200,
+    cors,
+    'public, max-age=300, s-maxage=600, stale-while-revalidate=300',
+    'free',
+  );
 }

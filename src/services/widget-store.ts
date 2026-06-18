@@ -178,12 +178,7 @@ export function isProWidgetEnabled(): boolean {
 }
 
 export function isProUser(): boolean {
-  return (
-    isWidgetFeatureEnabled() ||
-    isProWidgetEnabled() ||
-    getAuthState().user?.role === 'pro' ||
-    isEntitled()
-  );
+  return true;
 }
 
 export function getProWidgetKey(): string {
