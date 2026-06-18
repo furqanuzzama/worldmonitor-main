@@ -7,6 +7,11 @@
  *
  * GET /api/product-catalog → { tiers: [...], fetchedAt, cachedUntil }
  * DELETE /api/product-catalog → purge cache (requires RELAY_SHARED_SECRET)
+ *
+ * FREE MODE: the handler short-circuits immediately and returns a single
+ * "Free" tier covering all features. No Dodo/Redis calls are made.
+ * The full fetch/build/cache logic below is preserved for when paid
+ * tiers are re-enabled.
  */
 
 // @ts-check
@@ -81,10 +86,6 @@ function json(body, status, cors, cacheControl, source) {
     headers: {
       'Content-Type': 'application/json',
       ...(cacheControl ? { 'Cache-Control': cacheControl } : {}),
-      // Signals which code-path served the response so operators + the
-      // seed-contract probe can distinguish cache hits from Dodo/fallback.
-      // Without this header a green probe would not prove the cached-reader
-      // path is healthy — it could be silently falling through to fallback.
       ...(source ? { 'X-Product-Catalog-Source': source } : {}),
       ...cors,
     },
@@ -101,10 +102,6 @@ async function getFromCache() {
     if (!res.ok) return null;
     const { result } = await res.json();
     if (!result) return null;
-    // Envelope-aware: ais-relay now writes `product-catalog:v2` as {_seed, data}
-    // (PR #3097). Return the bare payload so clients see the legacy
-    // {tiers, fetchedAt, cachedUntil, priceSource} shape. Pre-contract bare
-    // values pass through unchanged.
     return unwrapEnvelope(JSON.parse(result)).data;
   } catch { return null; }
 }
@@ -189,7 +186,6 @@ function buildTiers(dodoPrices) {
       continue;
     }
 
-    // Find monthly and annual products for this tier group
     const monthlyEntry = Object.entries(CATALOG).find(([, v]) => v.tierGroup === group && v.billingPeriod === 'monthly');
     const annualEntry = Object.entries(CATALOG).find(([, v]) => v.tierGroup === group && v.billingPeriod === 'annual');
 
@@ -236,6 +232,8 @@ export default async function handler(req) {
     return json({ error: 'Method not allowed' }, 405, cors);
   }
 
+  // FREE MODE: return a single all-inclusive free tier immediately.
+  // No Dodo price fetch or Redis cache interaction needed.
   const now = Date.now();
   return json(
     {
@@ -243,7 +241,16 @@ export default async function handler(req) {
         {
           name: 'Free',
           description: 'All dashboard and API features are available for free.',
-          features: ['Core dashboard panels', 'AI stock analysis & backtesting', 'Daily market briefs', 'Military & geopolitical tracking', 'Custom widgets', 'MCP data connectors', 'Priority data refresh', 'Unlimited API access'],
+          features: [
+            'Core dashboard panels',
+            'AI stock analysis & backtesting',
+            'Daily market briefs',
+            'Military & geopolitical tracking',
+            'Custom widgets',
+            'MCP data connectors',
+            'Priority data refresh',
+            'Unlimited API access',
+          ],
           price: 0,
           period: 'forever',
           highlighted: true,

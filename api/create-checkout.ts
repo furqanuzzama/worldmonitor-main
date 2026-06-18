@@ -7,6 +7,11 @@
  * allowlist, HMAC signing, customer prefill).
  *
  * Used by both the /pro marketing page and the main dashboard.
+ *
+ * FREE MODE: returns 410 Gone immediately. Billing is disabled; all
+ * features are available without a subscription. The checkout relay
+ * logic is intentionally removed — if billing is re-enabled, restore
+ * the Clerk token validation and Convex relay from git history.
  */
 
 export const config = { runtime: 'edge' };
@@ -25,9 +30,7 @@ function json(body: unknown, status: number, cors: Record<string, string>): Resp
   });
 }
 
-export default async function handler(
-  req: Request,
-): Promise<Response> {
+export default async function handler(req: Request): Promise<Response> {
   const cors = getCorsHeaders(req) as Record<string, string>;
 
   if (req.method === 'OPTIONS') {
@@ -45,6 +48,9 @@ export default async function handler(
     return json({ error: 'Method not allowed' }, 405, cors);
   }
 
+  // FREE MODE: billing is disabled. All features are available for free.
+  // 410 Gone signals to callers (startCheckout in checkout.ts) that this
+  // endpoint is permanently unavailable, not a transient failure.
   return json(
     { error: 'Billing is disabled. All features are available for free.' },
     410,

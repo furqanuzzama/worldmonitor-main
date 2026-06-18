@@ -1,14 +1,14 @@
 /**
  * Entitlement enforcement middleware for the Vercel API gateway.
  *
- * Reads cached entitlements from Redis (raw keys, no deployment prefix) with
- * Convex fallback on cache miss. Returns a 403 Response for tier-gated endpoints
- * when the user lacks the required tier.
+ * FREE MODE — all entitlement checks are bypassed. Every endpoint is
+ * unrestricted and every user receives a full-pro entitlement object.
+ * The Redis/Convex fetch paths are dead code while this mode is active.
  *
- * Fail-closed behavior:
- *   - No userId header on a gated endpoint -> 403 (authentication required)
- *   - Redis miss + Convex failure -> 403 (unable to verify entitlements)
- *   - Endpoint not in ENDPOINT_ENTITLEMENTS -> allow (unrestricted)
+ * To re-enable paid gating:
+ *   1. Restore getRequiredTier to read from ENDPOINT_ENTITLEMENTS.
+ *   2. Restore getEntitlements to the Redis→Convex fetch path (_getEntitlementsImpl).
+ *   3. Restore checkEntitlement to enforce the tier comparison.
  */
 
 import { getCachedJson, setCachedJson } from './redis';
@@ -49,11 +49,7 @@ interface CachedEntitlements {
  * Adding a new gated endpoint = adding one line to this map.
  * Endpoints NOT in this map are unrestricted.
  *
- * Stock-analysis endpoints sit at tier 1 (Pro) — the productCatalog markets
- * "AI stock analysis & backtesting" as a Pro feature, and these paths are
- * also in PREMIUM_RPC_PATHS where the legacy bearer gate accepts tier >= 1.
- * Tier-2 here would have made the new gate stricter than the legacy one and
- * 403'd real Pro subscribers calling via Clerk session (no tester key).
+ * Kept for reference — not consulted in free mode.
  */
 const ENDPOINT_ENTITLEMENTS: Record<string, number> = {
   '/api/market/v1/analyze-stock': 1,
@@ -95,15 +91,20 @@ const ENTITLEMENT_CACHE_TTL_SECONDS = 900;
 
 /**
  * Returns the minimum tier required for a given endpoint pathname.
- * Returns null if the endpoint is unrestricted (not in the map).
+ *
+ * FREE MODE: always returns null (all endpoints unrestricted).
  */
 export function getRequiredTier(pathname: string): number | null {
+  // Free mode — no endpoint is gated.
+  // To re-enable: return ENDPOINT_ENTITLEMENTS[pathname] ?? null;
   return null;
 }
 
 /**
- * Fetches entitlements for a user. In free mode, all users receive a full
- * premium entitlement object so any gated endpoint behaves as unlocked.
+ * Fetches entitlements for a user.
+ *
+ * FREE MODE: returns a full-pro entitlement object for every user so
+ * any downstream tier check behaves as unlocked.
  */
 export async function getEntitlements(userId: string): Promise<CachedEntitlements | null> {
   return {
@@ -121,6 +122,10 @@ export async function getEntitlements(userId: string): Promise<CachedEntitlement
   };
 }
 
+/**
+ * Real fetch path — kept intact for when paid gating is re-enabled.
+ * Not called in free mode.
+ */
 async function _getEntitlementsImpl(userId: string): Promise<CachedEntitlements | null> {
   try {
     // Redis cache check (raw=true: entitlements use user-scoped keys, no deployment prefix)
@@ -140,7 +145,6 @@ async function _getEntitlementsImpl(userId: string): Promise<CachedEntitlements 
       // which returns the merged shape and rewrites the cache with the
       // post-U10 layout. Self-healing, bounded to one extra Convex
       // round-trip per affected user during the migration window.
-      // Reviewer round-2 P2 (cache layer).
       if (
         ent.validUntil >= Date.now() &&
         typeof (ent.features as { mcpAccess?: boolean }).mcpAccess === 'boolean'
@@ -171,15 +175,7 @@ async function _getEntitlementsImpl(userId: string): Promise<CachedEntitlements 
       // Populate Redis cache for subsequent requests (15-min TTL, raw key).
       //
       // Cache-write failures must NOT collapse "entitlement confirmed by Convex"
-      // into the null-means-no-entitlement return. Today setCachedJson swallows
-      // its own Upstash errors via an internal try/catch (server/_shared/redis.ts),
-      // but that contract is fragile — the tauri-sidecar dynamic import path at
-      // redis.ts:142-146 is OUTSIDE the inner try/catch, and any future code
-      // motion could let other errors propagate. Wrap explicitly here so the
-      // property "Convex said yes ⇒ caller sees yes" is local and load-bearing.
-      // Without this, an Upstash hiccup would 403 every paying customer on the
-      // very call paths this file gates — the same shape PR #3505 fixed for the
-      // Clerk-only-no-Convex outlier in api/widget-agent.ts.
+      // into the null-means-no-entitlement return.
       try {
         await setCachedJson(`entitlements:${ENV_PREFIX}:${userId}`, result, ENTITLEMENT_CACHE_TTL_SECONDS, true);
       } catch (cacheErr) {
@@ -199,21 +195,49 @@ async function _getEntitlementsImpl(userId: string): Promise<CachedEntitlements 
 /**
  * Checks whether the current request is allowed based on tier entitlements.
  *
+ * FREE MODE: always returns null (request allowed). The 403 path is
+ * unreachable while getRequiredTier returns null for every pathname.
+ *
  * Returns:
  *   - null if the request is allowed (unrestricted endpoint or sufficient tier)
- *   - a 403 Response if the user is unauthenticated, entitlements cannot be verified,
- *     or the user's tier is below the required tier (fail-closed)
+ *   - a 403 Response if the user is unauthenticated, entitlements cannot be
+ *     verified, or the user's tier is below the required tier (fail-closed)
  */
 export async function checkEntitlement(
   userId: string | null,
   pathname: string,
   corsHeaders: Record<string, string>,
 ): Promise<Response | null> {
+  // Free mode — getRequiredTier always returns null, so every request is
+  // unrestricted. Return null (allow) immediately.
+  const requiredTier = getRequiredTier(pathname);
+  if (requiredTier === null) return null;
+
+  // The block below is only reached when getRequiredTier is restored to
+  // return real tier values. It is intentionally kept so re-enabling paid
+  // gating requires only restoring getRequiredTier, not re-authoring the
+  // enforcement logic.
+  if (!userId) {
+    return new Response(
+      JSON.stringify({ error: 'Authentication required' }),
+      { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
+    );
+  }
+
+  const entitlements = await getEntitlements(userId);
+  if (!entitlements) {
+    return new Response(
+      JSON.stringify({ error: 'Unable to verify entitlements' }),
+      { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
+    );
+  }
+
+  if (entitlements.features.tier < requiredTier) {
+    return new Response(
+      JSON.stringify({ error: 'Insufficient tier for this endpoint' }),
+      { status: 403, headers: { 'Content-Type': 'application/json', ...corsHeaders } },
+    );
+  }
+
   return null;
-}
-    {
-      status: 403,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
-    },
-  );
 }
